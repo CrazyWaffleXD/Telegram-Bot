@@ -1,0 +1,578 @@
+import telebot
+from telebot import types
+import sqlite3
+from datetime import datetime
+
+# Инициализация бота
+TOKEN = '8094895160:AAGzj1vzPOWgs502sAcqC1ZP51_Y-3arv0s'
+bot = telebot.TeleBot(TOKEN)
+ADMIN_IDS = [5672359649]  # Ваш ID телеграма
+
+# Подключение к базе данных
+conn = sqlite3.connect('tasks.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# Предопределенные дисциплины
+PREDEFINED_DISCIPLINES = [
+    "Учебная практика по ПМ.01",
+    "Производственная практика по ПМ.01",
+    "Иностранный язык в профессиональной деятельности",
+    "Физическая культура",
+    "Компьютерные сети",
+    "Экзамен по ПМ.01",
+    "Поддержка и тестирование программных модулей",
+    "Разработка мобильных приложений",
+    "Системное программирование",
+    "Технология разработки программного обеспечения"
+]
+
+# Инициализация базы данных
+def initialize_database():
+    # Создаем все таблицы
+    tables = [
+        '''CREATE TABLE IF NOT EXISTS users
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            join_date TEXT)''',
+            
+        '''CREATE TABLE IF NOT EXISTS logs
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT,
+            timestamp TEXT)''',
+            
+        '''CREATE TABLE IF NOT EXISTS disciplines
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE)''',
+            
+        '''CREATE TABLE IF NOT EXISTS tasks
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discipline_id INTEGER,
+            name TEXT,
+            description TEXT,
+            deadline TEXT,
+            added_by INTEGER,
+            FOREIGN KEY(discipline_id) REFERENCES disciplines(id))''',
+            
+        '''CREATE TABLE IF NOT EXISTS solutions
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            text TEXT,
+            added_by INTEGER,
+            FOREIGN KEY(task_id) REFERENCES tasks(id))''',
+            
+        '''CREATE TABLE IF NOT EXISTS photos
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            file_id TEXT,
+            FOREIGN KEY(task_id) REFERENCES tasks(id))'''
+    ]
+    
+    for table in tables:
+        cursor.execute(table)
+    
+    # Добавляем предопределенные дисциплины
+    for discipline in PREDEFINED_DISCIPLINES:
+        try:
+            cursor.execute("INSERT OR IGNORE INTO disciplines (name) VALUES (?)", (discipline,))
+        except:
+            pass
+    conn.commit()
+
+# Логирование действий
+def log_action(user_id, action):
+    cursor.execute("INSERT INTO logs (user_id, action, timestamp) VALUES (?, ?, ?)",
+                  (user_id, action, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+
+# Главное меню
+def main_menu(user_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        "Добавить задание", 
+        "Список дисциплин",
+        "Список заданий"
+    ]
+    
+    if user_id in ADMIN_IDS:
+        buttons.append("Админ-панель")
+    
+    markup.add(*[types.KeyboardButton(btn) for btn in buttons])
+    return markup
+
+# Админ-панель
+def admin_panel(user_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        "Просмотреть логи", 
+        "Статистика пользователей",
+        "Список всех пользователей",
+        "Управление заданиями",
+        "Управление дисциплинами",
+        "Назад в меню"
+    ]
+    markup.add(*[types.KeyboardButton(btn) for btn in buttons])
+    return markup
+
+# Обработчик команды /start
+@bot.message_handler(commands=['start'])
+def start(message):
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+    last_name = message.from_user.last_name
+    join_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Сохраняем информацию о пользователе
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, join_date) VALUES (?, ?, ?, ?, ?)",
+                  (user_id, username, first_name, last_name, join_date))
+    conn.commit()
+    
+    log_action(user_id, "Запуск бота /start")
+    bot.send_message(user_id, "Привет! Я бот для учета учебных заданий.", reply_markup=main_menu(user_id))
+
+# Обработчик текстовых сообщений
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    user_id = message.from_user.id
+    text = message.text
+    
+    log_action(user_id, f"Нажата кнопка: {text}")
+    
+    if text == "Админ-панель" and user_id in ADMIN_IDS:
+        bot.send_message(user_id, "Админ-панель:", reply_markup=admin_panel(user_id))
+    
+    elif text == "Просмотреть логи" and user_id in ADMIN_IDS:
+        view_logs(message)
+    
+    elif text == "Статистика пользователей" and user_id in ADMIN_IDS:
+        view_user_stats(message)
+    
+    elif text == "Список всех пользователей" and user_id in ADMIN_IDS:
+        view_all_users(message)
+    
+    elif text == "Добавить задание":
+        show_disciplines_for_selection(message)
+    
+    elif text == "Список дисциплин":
+        show_disciplines(message)
+    
+    elif text == "Список заданий":
+        show_disciplines_for_tasks(message)
+    
+    elif text == "Управление заданиями" and user_id in ADMIN_IDS:
+        manage_tasks(message)
+    
+    elif text == "Управление дисциплинами" and user_id in ADMIN_IDS:
+        manage_disciplines(message)
+    
+    elif text in ["Назад", "Назад в меню"]:
+        handle_back(message)
+
+# --- Функции для работы с заданиями ---
+
+def show_disciplines_for_selection(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT id, name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(f"Дисциплина: {disc[1]}") for disc in disciplines]
+    buttons.append(types.KeyboardButton("Назад"))
+    markup.add(*buttons)
+    
+    bot.send_message(user_id, "Выберите дисциплину для задания:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text.startswith("Дисциплина: "))
+def process_task_discipline(message):
+    user_id = message.from_user.id
+    discipline_name = message.text.replace("Дисциплина: ", "")
+    
+    cursor.execute("SELECT id FROM disciplines WHERE name = ?", (discipline_name,))
+    result = cursor.fetchone()
+    
+    if not result:
+        bot.send_message(user_id, "Ошибка: дисциплина не найдена.", reply_markup=main_menu(user_id))
+        return
+    
+    discipline_id = result[0]
+    msg = bot.send_message(user_id, "Введите название задания:", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_task_name, discipline_id)
+
+def process_task_name(message, discipline_id):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        show_disciplines_for_selection(message)
+        return
+    
+    task_name = message.text
+    msg = bot.send_message(user_id, "Введите описание задания:", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_task_description, discipline_id, task_name, user_id)
+
+def process_task_description(message, discipline_id, task_name, added_by):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        msg = bot.send_message(user_id, "Введите название задания:", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_name, discipline_id)
+        return
+    
+    task_description = message.text
+    msg = bot.send_message(user_id, "Введите дату выполнения (ДД.ММ.ГГГГ):", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_task_deadline, discipline_id, task_name, task_description, added_by)
+
+def process_task_deadline(message, discipline_id, task_name, task_description, added_by):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        msg = bot.send_message(user_id, "Введите описание задания:", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_description, discipline_id, task_name, added_by)
+        return
+    
+    task_deadline = message.text
+    try:
+        cursor.execute("INSERT INTO tasks (discipline_id, name, description, deadline, added_by) VALUES (?, ?, ?, ?, ?)",
+                      (discipline_id, task_name, task_description, task_deadline, added_by))
+        conn.commit()
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("Да", "Нет", "Назад")
+        
+        msg = bot.send_message(user_id, "Хотите добавить фотографии к заданию?", reply_markup=markup)
+        bot.register_next_step_handler(msg, process_photo_decision, cursor.lastrowid)
+    except Exception as e:
+        bot.send_message(user_id, f"Ошибка при сохранении задания: {str(e)}", reply_markup=main_menu(user_id))
+
+def process_photo_decision(message, task_id):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        bot.send_message(user_id, "Задание сохранено без фотографий.", reply_markup=main_menu(user_id))
+        return
+    
+    if message.text.lower() == "да":
+        msg = bot.send_message(user_id, "Отправьте фотографии для задания:", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_photos, task_id)
+    else:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("Да", "Нет", "Назад")
+        
+        msg = bot.send_message(user_id, "Хотите добавить решение к заданию?", reply_markup=markup)
+        bot.register_next_step_handler(msg, process_solution_decision, task_id, user_id)
+
+@bot.message_handler(content_types=['photo'])
+def process_task_photos(message, task_id):
+    user_id = message.from_user.id
+    file_id = message.photo[-1].file_id
+    cursor.execute("INSERT INTO photos (task_id, file_id) VALUES (?, ?)", (task_id, file_id))
+    conn.commit()
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("Готово", "Добавить еще фото", "Назад")
+    
+    msg = bot.send_message(user_id, "Фото добавлено. Что дальше?", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_more_photos, task_id, user_id)
+
+def process_more_photos(message, task_id, added_by):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        bot.send_message(user_id, "Добавление фотографий отменено.", reply_markup=main_menu(user_id))
+        return
+    
+    if message.text == "Добавить еще фото":
+        msg = bot.send_message(user_id, "Отправьте следующую фотографию:", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_photos, task_id)
+    else:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("Да", "Нет", "Назад")
+        
+        msg = bot.send_message(user_id, "Хотите добавить решение к заданию?", reply_markup=markup)
+        bot.register_next_step_handler(msg, process_solution_decision, task_id, added_by)
+
+def process_solution_decision(message, task_id, added_by):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        bot.send_message(user_id, "Задание сохранено без решения.", reply_markup=main_menu(user_id))
+        return
+    
+    if message.text.lower() == "да":
+        msg = bot.send_message(user_id, "Введите решение задания:", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_solution, task_id, added_by)
+    else:
+        bot.send_message(user_id, "Задание успешно сохранено!", reply_markup=main_menu(user_id))
+
+def process_task_solution(message, task_id, added_by):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        bot.send_message(user_id, "Задание сохранено без решения.", reply_markup=main_menu(user_id))
+        return
+    
+    solution_text = message.text
+    cursor.execute("INSERT INTO solutions (task_id, text, added_by) VALUES (?, ?, ?)", (task_id, solution_text, added_by))
+    conn.commit()
+    bot.send_message(user_id, "Решение успешно добавлено к заданию!", reply_markup=main_menu(user_id))
+
+# --- Функции для работы с дисциплинами (только для админов) ---
+
+def manage_disciplines(message):
+    user_id = message.from_user.id
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = ["Добавить дисциплину", "Удалить дисциплину", "Переименовать дисциплину", "Назад"]
+    markup.add(*[types.KeyboardButton(btn) for btn in buttons])
+    bot.send_message(user_id, "Выберите действие с дисциплинами:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text == "Добавить дисциплину" and message.from_user.id in ADMIN_IDS)
+def add_discipline(message):
+    user_id = message.from_user.id
+    msg = bot.send_message(user_id, "Введите название новой дисциплины:", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_new_discipline)
+
+def process_new_discipline(message):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        manage_disciplines(message)
+        return
+    
+    discipline_name = message.text
+    try:
+        cursor.execute("INSERT INTO disciplines (name) VALUES (?)", (discipline_name,))
+        conn.commit()
+        bot.send_message(user_id, f"Дисциплина '{discipline_name}' успешно добавлена!", reply_markup=admin_panel(user_id))
+    except sqlite3.IntegrityError:
+        bot.send_message(user_id, f"Дисциплина '{discipline_name}' уже существует!", reply_markup=admin_panel(user_id))
+
+@bot.message_handler(func=lambda message: message.text == "Удалить дисциплину" and message.from_user.id in ADMIN_IDS)
+def delete_discipline_step1(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT id, name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(f"Удалить: {disc[1]}") for disc in disciplines]
+    buttons.append(types.KeyboardButton("Назад"))
+    markup.add(*buttons)
+    
+    bot.send_message(user_id, "Выберите дисциплину для удаления:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text.startswith("Удалить: ") and message.from_user.id in ADMIN_IDS)
+def delete_discipline_step2(message):
+    user_id = message.from_user.id
+    discipline_name = message.text.replace("Удалить: ", "")
+    
+    try:
+        cursor.execute("DELETE FROM disciplines WHERE name = ?", (discipline_name,))
+        conn.commit()
+        bot.send_message(user_id, f"Дисциплина '{discipline_name}' успешно удалена!", reply_markup=admin_panel(user_id))
+    except Exception as e:
+        bot.send_message(user_id, f"Ошибка при удалении: {str(e)}", reply_markup=admin_panel(user_id))
+
+@bot.message_handler(func=lambda message: message.text == "Переименовать дисциплину" and message.from_user.id in ADMIN_IDS)
+def rename_discipline_step1(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT id, name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(f"Переименовать: {disc[1]}") for disc in disciplines]
+    buttons.append(types.KeyboardButton("Назад"))
+    markup.add(*buttons)
+    
+    bot.send_message(user_id, "Выберите дисциплину для переименования:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text.startswith("Переименовать: ") and message.from_user.id in ADMIN_IDS)
+def rename_discipline_step2(message):
+    user_id = message.from_user.id
+    old_name = message.text.replace("Переименовать: ", "")
+    
+    msg = bot.send_message(user_id, f"Введите новое название для дисциплины '{old_name}':", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_rename_discipline, old_name)
+
+def process_rename_discipline(message, old_name):
+    user_id = message.from_user.id
+    if message.text == "Назад":
+        manage_disciplines(message)
+        return
+    
+    new_name = message.text
+    try:
+        cursor.execute("UPDATE disciplines SET name = ? WHERE name = ?", (new_name, old_name))
+        conn.commit()
+        bot.send_message(user_id, f"Дисциплина успешно переименована с '{old_name}' на '{new_name}'!", reply_markup=admin_panel(user_id))
+    except Exception as e:
+        bot.send_message(user_id, f"Ошибка при переименовании: {str(e)}", reply_markup=admin_panel(user_id))
+
+# --- Функции для управления заданиями (только для админов) ---
+
+def manage_tasks(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT id, name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(f"Задания: {disc[1]}") for disc in disciplines]
+    buttons.append(types.KeyboardButton("Назад"))
+    markup.add(*buttons)
+    
+    bot.send_message(user_id, "Выберите дисциплину для управления заданиями:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text.startswith("Задания: ") and message.from_user.id in ADMIN_IDS)
+def show_tasks_for_management(message):
+    user_id = message.from_user.id
+    discipline_name = message.text.replace("Задания: ", "")
+    
+    cursor.execute('''SELECT t.id, t.name 
+                   FROM tasks t 
+                   JOIN disciplines d ON t.discipline_id = d.id 
+                   WHERE d.name = ?''', (discipline_name,))
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        bot.send_message(user_id, f"В дисциплине '{discipline_name}' нет заданий.", reply_markup=admin_panel(user_id))
+        return
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(f"Удалить задание: {task[1]}") for task in tasks]
+    buttons.append(types.KeyboardButton("Назад"))
+    markup.add(*buttons)
+    
+    bot.send_message(user_id, f"Выберите задание из дисциплины '{discipline_name}' для удаления:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text.startswith("Удалить задание: ") and message.from_user.id in ADMIN_IDS)
+def delete_task(message):
+    user_id = message.from_user.id
+    task_name = message.text.replace("Удалить задание: ", "")
+    
+    try:
+        cursor.execute("DELETE FROM tasks WHERE name = ?", (task_name,))
+        conn.commit()
+        bot.send_message(user_id, f"Задание '{task_name}' успешно удалено!", reply_markup=admin_panel(user_id))
+    except Exception as e:
+        bot.send_message(user_id, f"Ошибка при удалении: {str(e)}", reply_markup=admin_panel(user_id))
+
+# --- Админ-функции ---
+
+def view_logs(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50")
+    logs = cursor.fetchall()
+    
+    if not logs:
+        bot.send_message(user_id, "Логи пусты.")
+        return
+    
+    response = "Последние 50 действий:\n\n"
+    for log in logs:
+        log_id, log_user_id, action, timestamp = log
+        cursor.execute("SELECT username FROM users WHERE user_id = ?", (log_user_id,))
+        user = cursor.fetchone()
+        username = user[0] if user else "Неизвестный"
+        response += f"{timestamp} - {username} ({log_user_id}): {action}\n"
+    
+    bot.send_message(user_id, response)
+
+def view_user_stats(message):
+    user_id = message.from_user.id
+    
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT user_id, COUNT(*) FROM logs GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10")
+    active_users = cursor.fetchall()
+    
+    response = f"📊 Статистика пользователей:\n\n"
+    response += f"👥 Всего пользователей: {total_users}\n\n"
+    
+    response += "🏆 Самые активные пользователи:\n"
+    for active_user in active_users:
+        user_id, count = active_user
+        cursor.execute("SELECT username FROM users WHERE user_id = ?", (user_id,))
+        username = cursor.fetchone()
+        username = username[0] if username else "Неизвестный"
+        response += f"- @{username}: {count} действий\n"
+    
+    bot.send_message(user_id, response)
+
+def view_all_users(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT user_id, username, first_name, last_name, join_date FROM users ORDER BY join_date DESC")
+    users = cursor.fetchall()
+    
+    if not users:
+        bot.send_message(user_id, "Нет зарегистрированных пользователей.")
+        return
+    
+    response = "📋 Список всех пользователей:\n\n"
+    for user in users:
+        user_id, username, first_name, last_name, join_date = user
+        name = f"{first_name} {last_name}" if last_name else first_name
+        response += f"👤 {name} (@{username if username else 'нет'})\n"
+        response += f"🆔 ID: {user_id}\n"
+        response += f"📅 Дата регистрации: {join_date}\n\n"
+    
+    bot.send_message(user_id, response)
+
+# --- Вспомогательные функции ---
+
+def show_disciplines(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    if not disciplines:
+        bot.send_message(user_id, "Нет доступных дисциплин.", reply_markup=main_menu(user_id))
+        return
+    
+    response = "Доступные дисциплины:\n"
+    for i, disc in enumerate(disciplines, 1):
+        response += f"{i}. {disc[0]}\n"
+    
+    bot.send_message(user_id, response, reply_markup=main_menu(user_id))
+
+def show_disciplines_for_tasks(message):
+    user_id = message.from_user.id
+    cursor.execute("SELECT id, name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    if not disciplines:
+        bot.send_message(user_id, "Нет доступных дисциплин.", reply_markup=main_menu(user_id))
+        return
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(f"Показать задания: {disc[1]}") for disc in disciplines]
+    buttons.append(types.KeyboardButton("Назад"))
+    markup.add(*buttons)
+    
+    bot.send_message(user_id, "Выберите дисциплину для просмотра заданий:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text.startswith("Показать задания: "))
+def show_tasks_for_discipline(message):
+    user_id = message.from_user.id
+    discipline_name = message.text.replace("Показать задания: ", "")
+    
+    cursor.execute('''SELECT t.name, t.description, t.deadline 
+                   FROM tasks t 
+                   JOIN disciplines d ON t.discipline_id = d.id 
+                   WHERE d.name = ?''', (discipline_name,))
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        bot.send_message(user_id, f"В дисциплине '{discipline_name}' нет заданий.", reply_markup=main_menu(user_id))
+        return
+    
+    response = f"Задания по дисциплине '{discipline_name}':\n\n"
+    for i, task in enumerate(tasks, 1):
+        response += f"{i}. {task[0]}\nОписание: {task[1]}\nСрок: {task[2]}\n\n"
+    
+    bot.send_message(user_id, response, reply_markup=main_menu(user_id))
+
+def handle_back(message):
+    user_id = message.from_user.id
+    if user_id in ADMIN_IDS and message.text == "Назад в меню":
+        bot.send_message(user_id, "Выберите действие:", reply_markup=main_menu(user_id))
+    else:
+        bot.send_message(user_id, "Выберите действие:", reply_markup=main_menu(user_id))
+
+if __name__ == '__main__':
+    initialize_database()
+    print("Бот запущен...")
+    bot.polling()

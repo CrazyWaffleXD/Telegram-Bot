@@ -1,0 +1,253 @@
+import telebot
+from telebot import types
+import sqlite3
+import datetime
+
+# Инициализация бота с вашим токеном
+TOKEN = '7900430364:AAEU7dVK9WVqElaHXhAPYEAmk34ahbdXcbQ'
+bot = telebot.TeleBot(TOKEN)
+
+# Подключение к базе данных
+conn = sqlite3.connect('tasks.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# Создание таблиц (общие для всех пользователей)
+cursor.execute('''CREATE TABLE IF NOT EXISTS disciplines
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT UNIQUE)''')  # Уникальное название дисциплины
+
+cursor.execute('''CREATE TABLE IF NOT EXISTS tasks
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              discipline_id INTEGER,
+              name TEXT,
+              description TEXT,
+              deadline TEXT,
+              added_by INTEGER,
+              FOREIGN KEY(discipline_id) REFERENCES disciplines(id))''')
+
+cursor.execute('''CREATE TABLE IF NOT EXISTS solutions
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER,
+              text TEXT,
+              added_by INTEGER,
+              FOREIGN KEY(task_id) REFERENCES tasks(id))''')
+
+cursor.execute('''CREATE TABLE IF NOT EXISTS photos
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER,
+              file_id TEXT,
+              FOREIGN KEY(task_id) REFERENCES tasks(id))''')
+
+conn.commit()
+
+# Обработчик команды /start
+@bot.message_handler(commands=['start'])
+def start(message):
+    user_id = message.chat.id
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    btn1 = types.KeyboardButton("Добавить дисциплину")
+    btn2 = types.KeyboardButton("Добавить задание")
+    btn3 = types.KeyboardButton("Список дисциплин")
+    btn4 = types.KeyboardButton("Список заданий")
+    markup.add(btn1, btn2, btn3, btn4)
+    
+    bot.send_message(user_id, "Привет! Я бот для учета учебных заданий. Выбери действие:", reply_markup=markup)
+
+# Обработчик текстовых сообщений
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    user_id = message.chat.id
+    if message.text == "Добавить дисциплину":
+        msg = bot.send_message(user_id, "Введите название дисциплины (она будет доступна всем пользователям):", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_discipline_name)
+    elif message.text == "Добавить задание":
+        show_disciplines_for_selection(message)
+    elif message.text == "Список дисциплин":
+        show_disciplines(message)
+    elif message.text == "Список заданий":
+        show_tasks(message)
+
+# Показать дисциплины для выбора
+def show_disciplines_for_selection(message):
+    user_id = message.chat.id
+    cursor.execute("SELECT id, name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    if not disciplines:
+        bot.send_message(user_id, "Нет доступных дисциплин. Сначала добавьте дисциплину!")
+        return
+        
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for disc in disciplines:
+        markup.add(types.KeyboardButton(f"Дисциплина: {disc[1]}"))
+    
+    msg = bot.send_message(user_id, "Выберите дисциплину для задания:", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_task_discipline)
+
+# Обработка названия дисциплины
+def process_discipline_name(message):
+    user_id = message.chat.id
+    discipline_name = message.text
+    
+    try:
+        # Пытаемся добавить дисциплину (название должно быть уникальным)
+        cursor.execute("INSERT INTO disciplines (name) VALUES (?)", (discipline_name,))
+        conn.commit()
+        bot.send_message(user_id, f"Дисциплина '{discipline_name}' успешно добавлена и доступна всем пользователям!")
+    except sqlite3.IntegrityError:
+        bot.send_message(user_id, f"Дисциплина '{discipline_name}' уже существует!")
+
+# Обработка выбора дисциплины для задания
+def process_task_discipline(message):
+    user_id = message.chat.id
+    discipline_name = message.text.replace("Дисциплина: ", "")
+    
+    # Получаем ID дисциплины
+    cursor.execute("SELECT id FROM disciplines WHERE name = ?", (discipline_name,))
+    discipline_id = cursor.fetchone()[0]
+    
+    msg = bot.send_message(user_id, "Введите название задания:", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_task_name, discipline_id)
+
+# Обработка названия задания
+def process_task_name(message, discipline_id):
+    user_id = message.chat.id
+    task_name = message.text
+    
+    msg = bot.send_message(user_id, "Введите описание задания (доступно всем пользователям):")
+    bot.register_next_step_handler(msg, process_task_description, discipline_id, task_name, user_id)
+
+# Обработка описания задания
+def process_task_description(message, discipline_id, task_name, added_by):
+    user_id = message.chat.id
+    task_description = message.text
+    
+    msg = bot.send_message(user_id, "Введите дату выполнения (ДД.ММ.ГГГГ):")
+    bot.register_next_step_handler(msg, process_task_deadline, discipline_id, task_name, task_description, added_by)
+
+# Обработка даты задания
+def process_task_deadline(message, discipline_id, task_name, task_description, added_by):
+    user_id = message.chat.id
+    task_deadline = message.text
+    
+    # Сохраняем задание в базу данных
+    cursor.execute("INSERT INTO tasks (discipline_id, name, description, deadline, added_by) VALUES (?, ?, ?, ?, ?)",
+                  (discipline_id, task_name, task_description, task_deadline, added_by))
+    conn.commit()
+    
+    # Предлагаем добавить фото
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("Да"), types.KeyboardButton("Нет"))
+    
+    msg = bot.send_message(user_id, "Хотите добавить фотографии к заданию? (они будут доступны всем)", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_photo_decision, cursor.lastrowid)
+
+# Обработка решения о добавлении фото
+def process_photo_decision(message, task_id):
+    user_id = message.chat.id
+    if message.text.lower() == "да":
+        msg = bot.send_message(user_id, "Отправьте фотографии для задания (можно несколько):", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_photos, task_id)
+    else:
+        # Предлагаем добавить решение
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("Да"), types.KeyboardButton("Нет"))
+        
+        msg = bot.send_message(user_id, "Хотите добавить решение к заданию? (оно будет доступно всем)", reply_markup=markup)
+        bot.register_next_step_handler(msg, process_solution_decision, task_id, user_id)
+
+# Обработка фотографий задания
+@bot.message_handler(content_types=['photo'])
+def process_task_photos(message, task_id):
+    user_id = message.chat.id
+    
+    # Сохраняем file_id фотографии
+    file_id = message.photo[-1].file_id
+    cursor.execute("INSERT INTO photos (task_id, file_id) VALUES (?, ?)", (task_id, file_id))
+    conn.commit()
+    
+    # Проверяем, есть ли еще фотографии
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("Готово"), types.KeyboardButton("Добавить еще фото"))
+    
+    msg = bot.send_message(user_id, "Фото добавлено и доступно всем пользователям. Что дальше?", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_more_photos, task_id, user_id)
+
+def process_more_photos(message, task_id, added_by):
+    user_id = message.chat.id
+    if message.text == "Добавить еще фото":
+        msg = bot.send_message(user_id, "Отправьте следующую фотографию:", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_photos, task_id)
+    else:
+        # Предлагаем добавить решение
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("Да"), types.KeyboardButton("Нет"))
+        
+        msg = bot.send_message(user_id, "Хотите добавить решение к заданию? (оно будет доступно всем)", reply_markup=markup)
+        bot.register_next_step_handler(msg, process_solution_decision, task_id, added_by)
+
+# Обработка решения о добавлении решения
+def process_solution_decision(message, task_id, added_by):
+    user_id = message.chat.id
+    if message.text.lower() == "да":
+        msg = bot.send_message(user_id, "Введите решение задания (оно будет доступно всем):", reply_markup=types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, process_task_solution, task_id, added_by)
+    else:
+        bot.send_message(user_id, "Задание успешно сохранено и доступно всем пользователям!", reply_markup=types.ReplyKeyboardRemove())
+
+# Обработка решения задания
+def process_task_solution(message, task_id, added_by):
+    user_id = message.chat.id
+    solution_text = message.text
+    
+    # Сохраняем решение в базу данных
+    cursor.execute("INSERT INTO solutions (task_id, text, added_by) VALUES (?, ?, ?)", (task_id, solution_text, added_by))
+    conn.commit()
+    
+    bot.send_message(user_id, "Решение успешно добавлено к заданию и доступно всем пользователям!")
+
+# Показать список дисциплин
+def show_disciplines(message):
+    user_id = message.chat.id
+    cursor.execute("SELECT name FROM disciplines")
+    disciplines = cursor.fetchall()
+    
+    if not disciplines:
+        bot.send_message(user_id, "Пока нет дисциплин.")
+        return
+    
+    response = "Доступные дисциплины:\n"
+    for i, disc in enumerate(disciplines, 1):
+        response += f"{i}. {disc[0]}\n"
+    
+    bot.send_message(user_id, response)
+
+# Показать список заданий
+def show_tasks(message):
+    user_id = message.chat.id
+    cursor.execute('''SELECT t.name, d.name, t.deadline, t.description, 
+                   (SELECT COUNT(*) FROM photos WHERE task_id = t.id) as photo_count,
+                   (SELECT COUNT(*) FROM solutions WHERE task_id = t.id) as solution_count
+                   FROM tasks t 
+                   JOIN disciplines d ON t.discipline_id = d.id''')
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        bot.send_message(user_id, "Пока нет заданий.")
+        return
+    
+    response = "Доступные задания:\n\n"
+    for i, task in enumerate(tasks, 1):
+        response += (f"{i}. {task[0]}\n"
+                    f"   Дисциплина: {task[1]}\n"
+                    f"   Срок: {task[2]}\n"
+                    f"   Описание: {task[3]}\n"
+                    f"   Фото: {task[4]}\n"
+                    f"   Решения: {task[5]}\n\n")
+    
+    bot.send_message(user_id, response)
+
+# Запуск бота
+if __name__ == '__main__':
+    print("Бот запущен...")
+    bot.polling()
