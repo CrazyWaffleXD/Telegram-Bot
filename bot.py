@@ -1,12 +1,75 @@
-import telebot
-from telebot import types
+import os
+import sys
+import subprocess
 import sqlite3
+import importlib
 from datetime import datetime
 import logging
-import os
 import time
-import threading # Для неблокирующей рассылки
-import sys # Для sys.exit
+import threading
+
+# Список необходимых библиотек
+REQUIRED_LIBRARIES = [
+    'pyTelegramBotAPI',
+    'sqlite3',
+    'logging',
+    'threading'
+]
+
+def install_libraries():
+    """Установка отсутствующих библиотек"""
+    for lib in REQUIRED_LIBRARIES:
+        try:
+            importlib.import_module(lib.split("==")[0])
+            print(f"Библиотека {lib} уже установлена")
+        except ImportError:
+            print(f"Установка {lib}...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+                print(f"Библиотека {lib} успешно установлена")
+            except Exception as e:
+                print(f"Ошибка при установке {lib}: {e}")
+                sys.exit(1)
+
+def init_db():
+    """Инициализация базы данных"""
+    conn = None
+    try:
+        conn = sqlite3.connect('bot_database.db')
+        cursor = conn.cursor()
+        
+        # Создаем таблицу пользователей, если её нет
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            registration_date TEXT
+        )
+        ''')
+        
+        # Можно добавить другие таблицы по необходимости
+        # cursor.execute('''CREATE TABLE IF NOT EXISTS ...''')
+        
+        conn.commit()
+        print("База данных успешно инициализирована")
+    except sqlite3.Error as e:
+        print(f"Ошибка при работе с SQLite: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+if __name__ == "__main__":
+    # Установка необходимых библиотек
+    install_libraries()
+    
+    # Инициализация базы данных
+    init_db()
+    
+    # Теперь можно импортировать telebot после проверки зависимостей
+    import telebot
+    from telebot import types
 
 # --- КОНФИГУРАЦИЯ ---
 # Настройка логирования
@@ -17,31 +80,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Получение токена из переменных окружения
-# Для запуска: export TELEGRAM_BOT_TOKEN='ВАШ_ТОКЕН_ЗДЕСЬ'
-# Или в Dockerfile/docker-compose.yml
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
     logger.error("Токен бота не найден в переменной окружения TELEGRAM_BOT_TOKEN.")
     logger.error("Пожалуйста, установите переменную окружения TELEGRAM_BOT_TOKEN.")
     logger.warning("Используется временный заглушечный токен. Это НЕБЕЗОПАСНО для продакшена!")
-    # ВНИМАНИЕ: Замените на sys.exit(1) на проде, если токен обязателен
-    TOKEN = '8094895160:AAGzj1vzPOWgs502sAcqC1ZP51_Y-3arv0s' # ВРЕМЕННАЯ ЗАГЛУШКА, УДАЛИТЕ НА ПРОДЕ!
+    TOKEN = '8050726015:AAGlFnBPzj9P6DNoMvYKyimiuSff82uXawc' # ВРЕМЕННАЯ ЗАГЛУШКА, УДАЛИТЕ НА ПРОДЕ!
     # sys.exit(1) # Раскомментируйте на проде для принудительного выхода без токена
 
 bot = telebot.TeleBot(TOKEN)
 
-# ID администраторов (могут быть добавлены в БД для динамического управления)
+# ID администраторов
 ADMIN_IDS = [5672359649, 1604969937]
 
-# Подключение к базе данных (check_same_thread=False оправдано для pyTelegramBotAPI, т.к. обработчики работают в одном потоке)
+# Подключение к базе данных
 conn = sqlite3.connect('tasks.db', check_same_thread=False)
 cursor = conn.cursor()
 
 # Константы
-MAX_BUTTONS_PER_PAGE = 8 # Максимальное количество кнопок на странице для пагинации
-MAX_LOG_ENTRIES = 50 # Максимальное количество записей в логе для отображения
+MAX_BUTTONS_PER_PAGE = 8
+MAX_LOG_ENTRIES = 50
 
-# Предопределенные дисциплины для инициализации БД
+# Предопределенные дисциплины
 PREDEFINED_DISCIPLINES = [
     "Учебная практика по ПМ.01",
     "Производственная практика по ПМ.01",
@@ -56,38 +116,47 @@ PREDEFINED_DISCIPLINES = [
 ]
 
 # --- КОНСТАНТЫ ДЛЯ CALLBACK_DATA ---
-# Префиксы для callback_data, чтобы было легче маршрутизировать запросы
-CB_PREFIX_DISC_SELECT = "select_disc:" # Выбор дисциплины для добавления задания
-CB_PREFIX_DISC_PAGE_ADD = "disc_page_add:" # Пагинация дисциплин для добавления задания
-CB_PREFIX_DISC_TASKS_VIEW = "show_disc_tasks:" # Выбор дисциплины для просмотра заданий
-CB_PREFIX_DISC_PAGE_VIEW = "disc_page_view:" # Пагинация дисциплин для просмотра заданий
-CB_PREFIX_TASK_VIEW = "view_task:" # Просмотр деталей задания
-CB_PREFIX_PHOTO_NAV = "photo_nav:" # Навигация по фотографиям
-CB_PREFIX_BACK_TO_TASK = "back_to_task:" # Назад к заданию из просмотра фото
-CB_PREFIX_BACK_TO_DISC_TASKS_VIEW = "back_to_disc_tasks_view:" # Назад к списку заданий из деталей
-CB_PREFIX_MANAGE_TASKS_DISC = "manage_disc_tasks:" # Выбор дисциплины для управления заданиями (админ)
-CB_PREFIX_MANAGE_TASKS_PAGE = "manage_tasks_page:" # Пагинация дисциплин для управления заданиями (админ)
-CB_PREFIX_ADMIN_DELETE_TASK = "admin_delete_task:" # Удаление задания (админ)
-CB_PREFIX_CONFIRM_DELETE_TASK = "confirm_delete_task:" # Подтверждение удаления задания (админ)
-CB_PREFIX_CANCEL_DELETE_TASK = "cancel_delete_task:" # Отмена удаления задания (админ)
-CB_PREFIX_DELETE_DISC = "delete_discipline:" # Выбор дисциплины для удаления (админ)
-CB_PREFIX_CONFIRM_DELETE_DISC = "confirm_delete_disc:" # Подтверждение удаления дисциплины (админ)
-CB_PREFIX_CONFIRM_DELETE_DISC_W_TASKS = "confirm_delete_disc_with_tasks:" # Подтверждение удаления дисциплины с заданиями (админ)
-CB_PREFIX_CANCEL_DELETE_DISC = "cancel_delete_disc:" # Отмена удаления дисциплины (админ)
-CB_PREFIX_DELETE_DISC_PAGE = "delete_disc_page:" # Пагинация дисциплин для удаления (админ)
-CB_PREFIX_RENAME_DISC = "rename_discipline:" # Выбор дисциплины для переименования (админ)
-CB_PREFIX_RENAME_DISC_PAGE = "rename_disc_page:" # Пагинация дисциплин для переименования (админ)
-CB_PREFIX_USERS_PAGE = "users_page:" # Пагинация списка пользователей (админ)
+# Префиксы для callback_data
+CB_PREFIX_DISC_SELECT = "select_disc:"
+CB_PREFIX_DISC_PAGE_ADD = "disc_page_add:"
+CB_PREFIX_DISC_TASKS_VIEW = "show_disc_tasks:"
+CB_PREFIX_DISC_PAGE_VIEW = "disc_page_view:"
+CB_PREFIX_TASK_VIEW = "view_task:"
+CB_PREFIX_PHOTO_NAV = "photo_nav:"
+CB_PREFIX_DOC_NAV = "doc_nav:"
+CB_PREFIX_BACK_TO_TASK = "back_to_task:"
+CB_PREFIX_BACK_TO_DISC_TASKS_VIEW = "back_to_disc_tasks_view:"
+CB_PREFIX_MANAGE_TASKS_DISC = "manage_disc_tasks:"
+CB_PREFIX_MANAGE_TASKS_PAGE = "manage_tasks_page:"
+CB_PREFIX_ADMIN_DELETE_TASK = "admin_delete_task:"
+CB_PREFIX_CONFIRM_DELETE_TASK = "confirm_delete_task:"
+CB_PREFIX_CANCEL_DELETE_TASK = "cancel_delete_task:"
+CB_PREFIX_DELETE_DISC = "delete_discipline:"
+CB_PREFIX_CONFIRM_DELETE_DISC = "confirm_delete_disc:"
+CB_PREFIX_CONFIRM_DELETE_DISC_W_TASKS = "confirm_delete_disc_with_tasks:"
+CB_PREFIX_CANCEL_DELETE_DISC = "cancel_delete_disc:"
+CB_PREFIX_DELETE_DISC_PAGE = "delete_disc_page:"
+CB_PREFIX_RENAME_DISC = "rename_discipline:"
+CB_PREFIX_RENAME_DISC_PAGE = "rename_disc_page:"
+CB_PREFIX_USERS_PAGE = "users_page:"
+CB_PREFIX_TEACHERS_PAGE = "teachers_page:"
+CB_PREFIX_MANAGE_TEACHERS = "manage_teacher:"
+CB_PREFIX_ADD_TEACHER = "add_teacher:"
+CB_PREFIX_EDIT_TEACHER = "edit_teacher:"
+CB_PREFIX_DELETE_TEACHER = "delete_teacher:"
+CB_PREFIX_CONFIRM_DELETE_TEACHER = "confirm_delete_teacher:"
+CB_PREFIX_CANCEL_DELETE_TEACHER = "cancel_delete_teacher:"
 
 # Общие колбэки
-CB_CANCEL = "cancel" # Общая отмена действия
-CB_BACK_TO_MAIN_MENU = "back_to_main_menu" # Назад в главное меню
-CB_BACK_TO_ADMIN_PANEL = "back_to_admin_panel" # Назад в админ-панель
-CB_BACK_TO_MANAGE_DISCIPLINES = "back_to_manage_disciplines" # Назад в управление дисциплинами
-CB_BACK_TO_MANAGE_TASKS = "back_to_manage_tasks" # Назад в управление заданиями
-CB_BACK_TO_DISC_SELECTION_FOR_VIEW = "back_to_disc_select_view" # Назад к выбору дисциплины для просмотра заданий
-CB_ANNOUNCE_CONFIRM = "announce_confirm" # Подтверждение рассылки
-CB_ANNOUNCE_CANCEL = "announce_cancel" # Отмена рассылки
+CB_CANCEL = "cancel"
+CB_BACK_TO_MAIN_MENU = "back_to_main_menu"
+CB_BACK_TO_ADMIN_PANEL = "back_to_admin_panel"
+CB_BACK_TO_MANAGE_DISCIPLINES = "back_to_manage_disciplines"
+CB_BACK_TO_MANAGE_TASKS = "back_to_manage_tasks"
+CB_BACK_TO_MANAGE_TEACHERS = "back_to_manage_teachers"
+CB_BACK_TO_DISC_SELECTION_FOR_VIEW = "back_to_disc_select_view"
+CB_ANNOUNCE_CONFIRM = "announce_confirm"
+CB_ANNOUNCE_CANCEL = "announce_cancel"
 
 # --- СТАТУСЫ ПОЛЬЗОВАТЕЛЕЙ ---
 class UserState:
@@ -151,18 +220,33 @@ def initialize_database():
                task_id INTEGER,
                file_id TEXT,
                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE)''',
+               
+            '''CREATE TABLE IF NOT EXISTS documents (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               task_id INTEGER,
+               file_id TEXT,
+               file_name TEXT,
+               file_type TEXT,
+               FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE)''',
                 
             '''CREATE TABLE IF NOT EXISTS logs (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                user_id INTEGER,
                action TEXT,
-               timestamp TEXT)'''
+               timestamp TEXT)''',
+               
+            '''CREATE TABLE IF NOT EXISTS teachers (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               name TEXT,
+               position TEXT,
+               contact TEXT,
+               disciplines TEXT)'''
         ]
 
         for table_sql in tables:
             cursor.execute(table_sql)
 
-        # Проверяем и добавляем недостающие столбцы в таблицу users (если они были добавлены позже)
+        # Проверяем и добавляем недостающие столбцы
         cursor.execute("PRAGMA table_info(users)")
         columns = [column[1] for column in cursor.fetchall()]
         
@@ -170,19 +254,18 @@ def initialize_database():
             cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
             conn.commit()
 
-        # Добавляем предопределенные дисциплины, если их нет
+        # Добавляем предопределенные дисциплины
         for discipline_name in PREDEFINED_DISCIPLINES:
             try:
                 cursor.execute("INSERT INTO disciplines (name) VALUES (?)", (discipline_name,))
                 conn.commit()
             except sqlite3.IntegrityError:
-                # Дисциплина уже существует, это нормально
                 conn.rollback()
             except Exception as e:
                 logger.error(f"Ошибка при добавлении дисциплины '{discipline_name}': {e}", exc_info=True)
                 conn.rollback()
 
-        # Убеждаемся, что администраторы из ADMIN_IDS есть в БД и имеют статус админа
+        # Убеждаемся, что администраторы из ADMIN_IDS есть в БД
         for admin_id in ADMIN_IDS:
             cursor.execute("""
                 INSERT INTO users (user_id, is_admin, join_date)
@@ -194,7 +277,7 @@ def initialize_database():
 
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}", exc_info=True)
-        raise # Перевыбрасываем исключение, так как без БД бот не будет работать корректно
+        raise
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
@@ -212,7 +295,6 @@ def log_action(user_id, action):
 def is_admin(user_id):
     """Проверка прав администратора."""
     try:
-        # Быстрая проверка для предопределенных админов (опционально, можно только по БД)
         if user_id in ADMIN_IDS:
             return True
         
@@ -237,10 +319,9 @@ def _safe_edit_message(chat_id, message_id, text, reply_markup=None, parse_mode=
     except telebot.apihelper.ApiTelegramException as e:
         if "message is not modified" in str(e).lower():
             logger.debug(f"Message {message_id} in chat {chat_id} not modified.")
-            return True # Считаем успехом, так как сообщение уже в нужном состоянии
+            return True
         elif "message to edit not found" in str(e).lower() or "message can't be edited" in str(e).lower():
             logger.warning(f"Failed to edit message {message_id} in chat {chat_id}: {e}. Attempting to send new message.")
-            # Сообщение не может быть отредактировано, возможно, оно слишком старое или удалено, попробуем отправить новое
             try:
                 bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
                 return True
@@ -302,6 +383,7 @@ def main_menu_markup(user_id):
         "➕ Добавить задание", 
         "📚 Список дисциплин",
         "📝 Список заданий",
+        "👨‍🏫 Преподаватели",
         "ℹ️ Помощь"
     ]
     
@@ -320,8 +402,9 @@ def admin_panel_markup():
         "📋 Список всех пользователей",
         "📌 Управление заданиями",
         "📚 Управление дисциплинами",
+        "👨‍🏫 Управление преподавателями",
         "📢 Сделать объявление",
-        "🔙 Назад в меню" # Возврат в главное меню
+        "🔙 Назад в меню"
     ]
     markup.add(*[types.KeyboardButton(btn) for btn in buttons])
     return markup
@@ -333,7 +416,19 @@ def manage_disciplines_markup():
         "➕ Добавить дисциплину",
         "➖ Удалить дисциплину",
         "✏️ Переименовать дисциплину",
-        "🔙 Назад" # Возврат в админ-панель
+        "🔙 Назад"
+    ]
+    markup.add(*[types.KeyboardButton(btn) for btn in buttons])
+    return markup
+
+def manage_teachers_markup():
+    """Меню управления преподавателями."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        "➕ Добавить преподавателя",
+        "✏️ Редактировать преподавателя",
+        "➖ Удалить преподавателя",
+        "🔙 Назад"
     ]
     markup.add(*[types.KeyboardButton(btn) for btn in buttons])
     return markup
@@ -370,7 +465,6 @@ def send_welcome(message):
     last_name = message.from_user.last_name
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Если команда вызвана в групповом чате, перенаправляем пользователя в ЛС
     if message.chat.type != 'private':
         try:
             bot.send_message(
@@ -382,13 +476,11 @@ def send_welcome(message):
             log_action(user_id, f"Перенаправлен в ЛС из группы: {message.chat.id}")
         except Exception as e:
             logger.error(f"Ошибка при попытке перенаправить user_id={user_id} из группы {message.chat.id}: {e}", exc_info=True)
-        return # Прекращаем выполнение в группе
+        return
 
     try:
-        # Определяем статус админа для этого пользователя
         is_admin_flag = 1 if user_id in ADMIN_IDS else 0
 
-        # Добавляем пользователя или обновляем информацию, сохраняя статус админа
         cursor.execute("""
             INSERT INTO users (user_id, username, first_name, last_name, join_date, is_admin)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -585,7 +677,6 @@ def process_task_deadline(message):
 
         deadline = message.text.strip()
         try:
-            # Проверяем только формат. Валидация, что дата в будущем, может быть добавлена
             datetime.strptime(deadline, "%d.%m.%Y") 
         except ValueError:
             msg = bot.send_message(user_id, "⚠️ Неверный формат даты. Используйте ДД.ММ.ГГГГ\nПример: 31.12.2023")
@@ -607,19 +698,20 @@ def process_task_deadline(message):
         
         msg = bot.send_message(
             user_id,
-            "🖼 Хотите добавить фотографии к заданию?",
+            "📎 Хотите добавить файлы (фото/документы) к заданию?",
             reply_markup=markup
         )
         
         state_data['task_id'] = task_id
-        user_state.set_state(user_id, 'waiting_for_photo_decision', state_data)
-        bot.register_next_step_handler(msg, process_photo_decision)
+        user_state.set_state(user_id, 'waiting_for_files_decision', state_data)
+        bot.register_next_step_handler(msg, process_files_decision)
+
     except Exception as e:
         logger.error(f"Ошибка в process_task_deadline для user_id={user_id}: {e}", exc_info=True)
         bot.send_message(user_id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.", reply_markup=main_menu_markup(user_id))
 
-def process_photo_decision(message):
-    """Обрабатывает решение пользователя о добавлении фотографий."""
+def process_files_decision(message):
+    """Обрабатывает решение пользователя о добавлении файлов."""
     user_id = message.from_user.id
     state_data = user_state.get_state(user_id)['data']
     task_id = state_data['task_id']
@@ -628,8 +720,8 @@ def process_photo_decision(message):
         if message.content_type != 'text' or message.text.lower() not in ["нет", "❌ нет", "да", "✅ да"]:
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
             markup.add("✅ Да", "❌ Нет")
-            msg = bot.send_message(user_id, "Пожалуйста, выберите вариант из предложенных: 'Да' или 'Нет'.\n🖼 Хотите добавить фотографии к заданию?", reply_markup=markup)
-            bot.register_next_step_handler(msg, process_photo_decision)
+            msg = bot.send_message(user_id, "Пожалуйста, выберите вариант из предложенных: 'Да' или 'Нет'.\n📎 Хотите добавить файлы (фото/документы) к заданию?", reply_markup=markup)
+            bot.register_next_step_handler(msg, process_files_decision)
             return
 
         if message.text.lower() in ["нет", "❌ нет"]:
@@ -639,18 +731,18 @@ def process_photo_decision(message):
         if message.text.lower() in ["да", "✅ да"]:
             msg = bot.send_message(
                 user_id,
-                "📸 Отправьте фотографии для задания (можно несколько, по одной):",
+                "📎 Отправьте файлы (фото или документы) для задания (можно несколько, по одному):",
                 reply_markup=types.ReplyKeyboardRemove()
             )
-            user_state.set_state(user_id, 'waiting_for_task_photos', state_data)
-            bot.register_next_step_handler(msg, process_task_photos)
+            user_state.set_state(user_id, 'waiting_for_task_files', state_data)
+            bot.register_next_step_handler(msg, process_task_files)
     except Exception as e:
-        logger.error(f"Ошибка в process_photo_decision для user_id={user_id}: {e}", exc_info=True)
+        logger.error(f"Ошибка в process_files_decision для user_id={user_id}: {e}", exc_info=True)
         bot.send_message(user_id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.", reply_markup=main_menu_markup(user_id))
 
-@bot.message_handler(content_types=['photo', 'text'], func=lambda m: user_state.get_state(m.from_user.id).get('state') in ['waiting_for_task_photos', 'waiting_for_more_photos'])
-def process_task_photos(message):
-    """Обрабатывает добавление фотографий к заданию и решение о добавлении большего количества."""
+@bot.message_handler(content_types=['photo', 'document', 'text'], func=lambda m: user_state.get_state(m.from_user.id).get('state') in ['waiting_for_task_files', 'waiting_for_more_files'])
+def process_task_files(message):
+    """Обрабатывает добавление файлов (фото и документов) к заданию."""
     user_id = message.from_user.id
     state_data = user_state.get_state(user_id)['data']
     
@@ -658,8 +750,7 @@ def process_task_photos(message):
         task_id = state_data['task_id']
         
         if message.content_type == 'photo':
-            file_id = message.photo[-1].file_id # Берем самое большое разрешение
-            
+            file_id = message.photo[-1].file_id
             cursor.execute(
                 "INSERT INTO photos (task_id, file_id) VALUES (?, ?)",
                 (task_id, file_id)
@@ -667,49 +758,42 @@ def process_task_photos(message):
             conn.commit()
             log_action(user_id, f"Добавлена фотография к заданию {task_id}")
             
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-            markup.add("✅ Готово", "➕ Добавить еще фото")
-            
-            msg = bot.send_message(
-                user_id,
-                "📸 Фото добавлено. Что дальше?",
-                reply_markup=markup
+        elif message.content_type == 'document':
+            file_id = message.document.file_id
+            file_name = message.document.file_name
+            file_type = message.document.mime_type
+            cursor.execute(
+                "INSERT INTO documents (task_id, file_id, file_name, file_type) VALUES (?, ?, ?, ?)",
+                (task_id, file_id, file_name, file_type)
             )
-            
-            user_state.set_state(user_id, 'waiting_for_more_photos', state_data)
-            bot.register_next_step_handler(msg, process_task_photos) # Перерегистрируем на эту же функцию
-            return
+            conn.commit()
+            log_action(user_id, f"Добавлен документ '{file_name}' к заданию {task_id}")
         
-        elif message.content_type == 'text':
-            if message.text.lower() in ["готово", "✅ готово"]:
-                ask_for_solution(user_id, task_id)
-                return
-            
-            if message.text.lower() in ["добавить еще фото", "➕ добавить еще фото"]:
-                msg = bot.send_message(
-                    user_id,
-                    "📸 Отправьте следующую фотографию:",
-                    reply_markup=types.ReplyKeyboardRemove()
-                )
-                user_state.set_state(user_id, 'waiting_for_task_photos', state_data)
-                bot.register_next_step_handler(msg, process_task_photos) # Перерегистрируем на эту же функцию
-                return
-            else:
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-                markup.add("✅ Готово", "➕ Добавить еще фото")
-                msg = bot.send_message(user_id, "Пожалуйста, выберите вариант из предложенных: 'Готово' или 'Добавить еще фото'.", reply_markup=markup)
-                bot.register_next_step_handler(msg, process_task_photos)
-                return
+        elif message.content_type == 'text' and message.text.lower() in ["готово", "✅ готово"]:
+            ask_for_solution(user_id, task_id)
+            return
         else:
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-            markup.add("✅ Готово", "➕ Добавить еще фото")
-            msg = bot.send_message(user_id, "⚠️ Неизвестный тип сообщения. Пожалуйста, отправьте фото или выберите действие.", reply_markup=markup)
-            bot.register_next_step_handler(msg, process_task_photos)
+            markup.add("✅ Готово", "➕ Добавить еще файлы")
+            msg = bot.send_message(user_id, "⚠️ Пожалуйста, отправьте фото или документ.", reply_markup=markup)
+            bot.register_next_step_handler(msg, process_task_files)
             return
-
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("✅ Готово", "➕ Добавить еще файлы")
+        
+        msg = bot.send_message(
+            user_id,
+            "📎 Файл добавлен. Что дальше?",
+            reply_markup=markup
+        )
+        
+        user_state.set_state(user_id, 'waiting_for_more_files', state_data)
+        bot.register_next_step_handler(msg, process_task_files)
+        
     except Exception as e:
-        logger.error(f"Ошибка в process_task_photos для user_id={user_id}: {e}", exc_info=True)
-        bot.send_message(user_id, "⚠️ Произошла ошибка при добавлении фото. Попробуйте позже.", reply_markup=main_menu_markup(user_id))
+        logger.error(f"Ошибка в process_task_files для user_id={user_id}: {e}", exc_info=True)
+        bot.send_message(user_id, "⚠️ Произошла ошибка при добавлении файла. Попробуйте позже.", reply_markup=main_menu_markup(user_id))
 
 def ask_for_solution(user_id, task_id):
     """Спрашивает пользователя, хочет ли он добавить решение."""
@@ -990,6 +1074,10 @@ def view_task_details(call):
         cursor.execute("SELECT file_id FROM photos WHERE task_id = ?", (task_id,))
         photos = cursor.fetchall()
         
+        # Получаем документы для задания
+        cursor.execute("SELECT file_id, file_name, file_type FROM documents WHERE task_id = ?", (task_id,))
+        documents = cursor.fetchall()
+        
         # Получаем решение для задания
         cursor.execute("SELECT text FROM solutions WHERE task_id = ?", (task_id,))
         solution = cursor.fetchone()
@@ -1004,7 +1092,9 @@ def view_task_details(call):
             response += f"📝 Решение:\n{solution[0]}\n\n"
         
         if photos:
-            response += f"🖼 Прикреплено фотографий: {len(photos)}"
+            response += f"🖼 Прикреплено фотографий: {len(photos)}\n"
+        if documents:
+            response += f"📎 Прикреплено документов: {len(documents)}"
         
         # Создаем клавиатуру
         markup = types.InlineKeyboardMarkup()
@@ -1014,6 +1104,13 @@ def view_task_details(call):
             markup.add(types.InlineKeyboardButton(
                 text="🖼 Просмотреть фотографии",
                 callback_data=f"{CB_PREFIX_PHOTO_NAV}{task_id}:0" # Индекс первой фотографии
+            ))
+        
+        # Кнопка для просмотра документов, если они есть
+        if documents:
+            markup.add(types.InlineKeyboardButton(
+                text="📎 Просмотреть документы",
+                callback_data=f"{CB_PREFIX_DOC_NAV}{task_id}:0" # Индекс первого документа
             ))
         
         markup.add(types.InlineKeyboardButton(
@@ -1035,6 +1132,65 @@ def view_task_details(call):
         logger.error(f"Ошибка в view_task_details для user_id={user_id}, task_id={task_id}: {e}", exc_info=True)
         bot.send_message(user_id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.", reply_markup=main_menu_markup(user_id))
         bot.answer_callback_query(call.id, "⚠️ Ошибка.")
+
+def send_document_with_navigation(chat_id, message_id, documents, current_index, task_id):
+    """Отправляет или редактирует сообщение с документом и кнопками навигации."""
+    try:
+        markup = types.InlineKeyboardMarkup()
+        
+        # Кнопки навигации по документам
+        if len(documents) > 1:
+            row_buttons = []
+            if current_index > 0:
+                row_buttons.append(types.InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=f"{CB_PREFIX_DOC_NAV}{task_id}:{current_index-1}"
+                ))
+            if current_index < len(documents) - 1:
+                row_buttons.append(types.InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=f"{CB_PREFIX_DOC_NAV}{task_id}:{current_index+1}"
+                ))
+            markup.row(*row_buttons)
+        
+        markup.add(types.InlineKeyboardButton(
+            text="🔙 Назад к заданию",
+            callback_data=f"{CB_PREFIX_BACK_TO_TASK}{task_id}"
+        ))
+        
+        # Отправляем/редактируем сообщение с документом
+        doc = documents[current_index]
+        file_id, file_name, file_type = doc
+        
+        if message_id:
+            try:
+                bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    media=types.InputMediaDocument(
+                        media=file_id,
+                        caption=f"📎 Документ {current_index+1} из {len(documents)}\n\nИмя файла: {file_name}\nТип: {file_type}"
+                    ),
+                    reply_markup=markup
+                )
+            except telebot.apihelper.ApiTelegramException as e:
+                logger.warning(f"Failed to edit message media {message_id} in chat {chat_id}: {e}. Attempting to send new document message.")
+                bot.send_document(
+                    chat_id=chat_id,
+                    data=file_id,
+                    caption=f"📎 Документ {current_index+1} из {len(documents)}\n\nИмя файла: {file_name}\nТип: {file_type}",
+                    reply_markup=markup
+                )
+        else:
+            bot.send_document(
+                chat_id=chat_id,
+                data=file_id,
+                caption=f"📎 Документ {current_index+1} из {len(documents)}\n\nИмя файла: {file_name}\nТип: {file_type}",
+                reply_markup=markup
+            )
+    except Exception as e:
+        logger.error(f"Ошибка в send_document_with_navigation для task_id={task_id}, doc_index={current_index}: {e}", exc_info=True)
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при загрузке документа. Пожалуйста, попробуйте позже.")
 
 def send_photo_with_navigation(chat_id, message_id, photos, current_index, task_id):
     """Отправляет или редактирует сообщение с фотографией и кнопками навигации."""
@@ -1223,6 +1379,100 @@ def handle_back_to_main_menu_callback(call):
         bot.send_message(user_id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.", reply_markup=main_menu_markup(user_id))
         bot.answer_callback_query(call.id, "⚠️ Ошибка.")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith(CB_PREFIX_DOC_NAV))
+def handle_doc_navigation(call):
+    """Обрабатывает навигацию по документам задания."""
+    user_id = call.from_user.id
+    _, task_id, doc_index = call.data.split(':')
+    task_id = int(task_id)
+    doc_index = int(doc_index)
+    
+    try:
+        # Получаем документы для задания
+        cursor.execute("SELECT file_id, file_name, file_type FROM documents WHERE task_id = ? ORDER BY id", (task_id,))
+        documents = cursor.fetchall()
+        
+        if not documents:
+            bot.answer_callback_query(call.id, "⚠️ Нет документов для этого задания.", show_alert=True)
+            return
+        
+        # Проверяем валидность индекса
+        if doc_index < 0 or doc_index >= len(documents):
+            bot.answer_callback_query(call.id, "⚠️ Достигнут конец списка документов.", show_alert=True)
+            return
+        
+        # Получаем информацию о задании для кнопки "Назад"
+        task_info = _get_task_info(task_id)
+        if not task_info:
+            bot.answer_callback_query(call.id, "⚠️ Задание не найдено.", show_alert=True)
+            return
+        
+        # Создаем клавиатуру навигации
+        markup = types.InlineKeyboardMarkup()
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if doc_index > 0:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"{CB_PREFIX_DOC_NAV}:{task_id}:{doc_index - 1}"
+            ))
+        if doc_index < len(documents) - 1:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="Вперед ➡️",
+                callback_data=f"{CB_PREFIX_DOC_NAV}:{task_id}:{doc_index + 1}"
+            ))
+        
+        if nav_buttons:
+            markup.row(*nav_buttons)
+        
+        # Кнопка возврата к заданию
+        markup.add(types.InlineKeyboardButton(
+            text="🔙 Назад к заданию",
+            callback_data=f"{CB_PREFIX_TASK_VIEW}:{task_id}"
+        ))
+        
+        # Получаем текущий документ
+        file_id, file_name, file_type = documents[doc_index]
+        
+        # Формируем подпись
+        caption = (f"📎 Документ {doc_index + 1} из {len(documents)}\n"
+                  f"📄 Имя файла: {file_name}\n"
+                  f"📝 Тип: {file_type}")
+        
+        # Отправляем/редактируем сообщение с документом
+        try:
+            # Пытаемся редактировать существующее сообщение
+            bot.edit_message_media(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                media=types.InputMediaDocument(
+                    media=file_id,
+                    caption=caption
+                ),
+                reply_markup=markup
+            )
+        except telebot.apihelper.ApiTelegramException as e:
+            # Если редактирование не удалось (например, сообщение слишком старое)
+            logger.warning(f"Не удалось редактировать сообщение, отправляю новое: {e}")
+            bot.send_document(
+                chat_id=call.message.chat.id,
+                document=file_id,
+                caption=caption,
+                reply_markup=markup
+            )
+            # Пытаемся удалить старое сообщение
+            try:
+                bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
+            except Exception as delete_e:
+                logger.warning(f"Не удалось удалить старое сообщение: {delete_e}")
+        
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в handle_doc_navigation для user_id={user_id}, task_id={task_id}, doc_index={doc_index}: {e}", exc_info=True)
+        bot.send_message(user_id, "⚠️ Произошла ошибка при загрузке документа. Пожалуйста, попробуйте позже.", reply_markup=main_menu_markup(user_id))
+        bot.answer_callback_query(call.id, "⚠️ Ошибка.")
 
 # --- АДМИНИСТРАТИВНЫЕ ФУНКЦИИ ---
 
