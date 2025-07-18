@@ -85,13 +85,13 @@ if not TOKEN:
     logger.error("Токен бота не найден в переменной окружения TELEGRAM_BOT_TOKEN.")
     logger.error("Пожалуйста, установите переменную окружения TELEGRAM_BOT_TOKEN.")
     logger.warning("Используется временный заглушечный токен. Это НЕБЕЗОПАСНО для продакшена!")
-    TOKEN = '8050726015:AAGlFnBPzj9P6DNoMvYKyimiuSff82uXawc' # ВРЕМЕННАЯ ЗАГЛУШКА, УДАЛИТЕ НА ПРОДЕ!
+    TOKEN = 'Токен бота' # ВРЕМЕННАЯ ЗАГЛУШКА, УДАЛИТЕ НА ПРОДЕ! 
     # sys.exit(1) # Раскомментируйте на проде для принудительного выхода без токена
 
 bot = telebot.TeleBot(TOKEN)
 
 # ID администраторов
-ADMIN_IDS = [5672359649, 1604969937]
+ADMIN_IDS = [Админ(1), Админ(2) ]
 
 # Подключение к базе данных
 conn = sqlite3.connect('tasks.db', check_same_thread=False)
